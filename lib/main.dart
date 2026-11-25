@@ -1,5 +1,7 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'api_service.dart';
+import 'package:http/http.dart' as http;
 import 'config.dart';
 
 void main() {
@@ -12,58 +14,110 @@ class SahyadriBankApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: AppConfig.bankName,
+      title: 'Sahyadri Digital Bank',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0F3D68)),
         useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0D47A1),
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF5F7FA),
       ),
-      home: const MainShell(),
+      home: const BankHomeScreen(),
     );
   }
 }
 
-class MainShell extends StatefulWidget {
-  const MainShell({super.key});
+class BankHomeScreen extends StatefulWidget {
+  const BankHomeScreen({super.key});
 
   @override
-  State<MainShell> createState() => _MainShellState();
+  State<BankHomeScreen> createState() => _BankHomeScreenState();
 }
 
-class _MainShellState extends State<MainShell> {
-  int _selectedIndex = 0;
-  bool _isOpsMode = false;
+class _BankHomeScreenState extends State<BankHomeScreen> {
+  bool _isDeveloperMode = false;
+  int _devTabIndex = 0;
   int _titleTapCount = 0;
   DateTime? _lastTapTime;
 
-  String _serverEnv = AppConfig.appEnv;
-  bool _isHealthy = false;
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  List<dynamic> _accounts = [];
+  List<dynamic> _transactions = [];
+  List<dynamic> _branches = [];
+  List<dynamic> _auditLogs = [];
 
   @override
   void initState() {
     super.initState();
-    _checkServerHealth();
+    _fetchAllData();
   }
 
-  Future<void> _checkServerHealth() async {
+  Future<List<dynamic>> _getEndpoint(String path) async {
+    final uri = Uri.parse('${AppConfig.apiUrl}$path');
+    final response = await http.get(uri).timeout(
+          const Duration(seconds: 60),
+          onTimeout: () => throw TimeoutException(
+            'Server wake-up timed out (60s). Pull down to retry.',
+          ),
+        );
+
+    if (response.statusCode != 200) {
+      throw Exception('HTTP ${response.statusCode} on $path: ${response.body}');
+    }
+
+    final decoded = jsonDecode(response.body);
+    if (decoded is List) return decoded;
+    if (decoded is Map && decoded.containsKey('data')) {
+      return decoded['data'] as List<dynamic>;
+    }
+    return [];
+  }
+
+  Future<List<dynamic>> _getEndpointSafe(String path) async {
     try {
-      final health = await ApiService.fetchHealth();
+      return await _getEndpoint(path);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _fetchAllData() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final accounts = await _getEndpoint('/accounts');
+      final transactions = await _getEndpoint('/transactions');
+      final branches = await _getEndpointSafe('/branches');
+      final auditLogs = await _getEndpointSafe('/audit');
+
       if (!mounted) return;
       setState(() {
-        _serverEnv = health['environment'] ?? AppConfig.appEnv;
-        _isHealthy = health['status'] == 'healthy';
+        _accounts = accounts;
+        _transactions = transactions;
+        _branches = branches;
+        _auditLogs = auditLogs;
+        _isLoading = false;
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      setState(() => _isHealthy = false);
+      setState(() {
+        _errorMessage = e.toString();
+        _isLoading = false;
+      });
     }
   }
 
   void _handleTitleTap() {
-    if (_isOpsMode) return;
-
     final now = DateTime.now();
-    if (_lastTapTime == null || now.difference(_lastTapTime!) > const Duration(seconds: 2)) {
+    if (_lastTapTime == null ||
+        now.difference(_lastTapTime!) > const Duration(seconds: 2)) {
       _titleTapCount = 1;
     } else {
       _titleTapCount++;
@@ -72,104 +126,88 @@ class _MainShellState extends State<MainShell> {
 
     if (_titleTapCount >= 3) {
       _titleTapCount = 0;
-      _showDeveloperLoginDialog();
+      if (_isDeveloperMode) {
+        setState(() => _isDeveloperMode = false);
+      } else {
+        _showDeveloperLoginDialog();
+      }
     }
   }
 
   void _showDeveloperLoginDialog() {
     final userController = TextEditingController();
     final passController = TextEditingController();
-    String? errorText;
+    String? dialogError;
 
     showDialog(
       context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Row(
-                children: [
-                  Icon(Icons.admin_panel_settings, color: Color(0xFF0F3D68)),
-                  SizedBox(width: 8),
-                  Text('Developer Ops Access'),
-                ],
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    'Enter data engineering credentials to unlock environment telemetry and ingestion audit logs.',
-                    style: TextStyle(fontSize: 13),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: userController,
-                    decoration: const InputDecoration(
-                      labelText: 'Developer ID',
-                      border: OutlineInputBorder(),
-                      prefixIcon: Icon(Icons.person_outline),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: passController,
-                    obscureText: true,
-                    decoration: InputDecoration(
-                      labelText: 'Passcode',
-                      border: const OutlineInputBorder(),
-                      prefixIcon: const Icon(Icons.lock_outline),
-                      errorText: errorText,
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Developer / Ops Mode'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: userController,
+                decoration: const InputDecoration(
+                  labelText: 'Username',
+                  border: OutlineInputBorder(),
                 ),
-                FilledButton(
-                  onPressed: () {
-                    if (userController.text.trim() == AppConfig.devUsername &&
-                        passController.text == AppConfig.devPassword) {
-                      Navigator.pop(ctx);
-                      _checkServerHealth();
-                      setState(() => _isOpsMode = true);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Developer Ops Mode Unlocked')),
-                      );
-                    } else {
-                      setDialogState(() {
-                        errorText = 'Invalid developer credentials';
-                      });
-                    }
-                  },
-                  child: const Text('Unlock'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: passController,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Password',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              if (dialogError != null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  dialogError!,
+                  style: const TextStyle(color: Colors.red, fontSize: 13),
                 ),
               ],
-            );
-          },
-        );
-      },
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final enteredUser = userController.text.trim();
+                final enteredPass = passController.text.trim();
+                if (enteredUser == AppConfig.devUser &&
+                    enteredPass == AppConfig.devPass) {
+                  Navigator.pop(ctx);
+                  setState(() {
+                    _isDeveloperMode = true;
+                    _devTabIndex = 0;
+                  });
+                } else {
+                  setDialogState(() {
+                    dialogError = 'Invalid developer credentials';
+                  });
+                }
+              },
+              child: const Text('Unlock'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
-  void _lockOpsMode() {
-    setState(() {
-      _isOpsMode = false;
-      _selectedIndex = 0;
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Switched back to Customer Banking View')),
-    );
-  }
-
-  Color _envColor(String env) {
-    switch (env.toUpperCase()) {
+  Color _envBadgeColor() {
+    switch (AppConfig.appEnv.toUpperCase()) {
       case 'PROD':
         return Colors.red.shade700;
       case 'TEST':
-        return Colors.orange.shade800;
+        return Colors.orange.shade700;
       default:
         return Colors.green.shade700;
     }
@@ -177,55 +215,51 @@ class _MainShellState extends State<MainShell> {
 
   @override
   Widget build(BuildContext context) {
-    final opsScreens = [
-      BankingLedgerTab(isOpsMode: _isOpsMode),
-      const BranchSummaryTab(),
-      const PipelineAuditTab(),
-    ];
-
     return Scaffold(
       appBar: AppBar(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        elevation: 1,
         title: GestureDetector(
           onTap: _handleTitleTap,
+          behavior: HitTestBehavior.opaque,
           child: Row(
-            mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.account_balance, color: Color(0xFF0F3D68)),
-              const SizedBox(width: 8),
-              Flexible(
+              const Icon(Icons.account_balance, color: Color(0xFF0D47A1)),
+              const SizedBox(width: 10),
+              const Flexible(
                 child: Text(
-                  AppConfig.bankName,
+                  'Sahyadri Digital Bank',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 18,
+                    color: Color(0xFF1A1C1E),
+                  ),
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
               ),
             ],
           ),
         ),
         actions: [
-          if (!_isOpsMode)
-            IconButton(
-              tooltip: 'Developer Ops Login',
-              icon: const Icon(Icons.lock_outline, size: 20, color: Colors.grey),
-              onPressed: _showDeveloperLoginDialog,
-            )
-          else ...[
+          if (_isDeveloperMode) ...[
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color: _envColor(_serverEnv),
-                borderRadius: BorderRadius.circular(12),
+                color: _envBadgeColor(),
+                borderRadius: BorderRadius.circular(16),
               ),
               child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    _isHealthy ? Icons.cloud_done : Icons.cloud_off,
+                    _errorMessage == null ? Icons.cloud_done : Icons.cloud_off,
                     size: 14,
                     color: Colors.white,
                   ),
                   const SizedBox(width: 4),
                   Text(
-                    _serverEnv,
+                    AppConfig.appEnv.toUpperCase(),
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
@@ -236,298 +270,276 @@ class _MainShellState extends State<MainShell> {
               ),
             ),
             IconButton(
-              tooltip: 'Exit Ops Mode',
               icon: const Icon(Icons.logout, color: Colors.redAccent),
-              onPressed: _lockOpsMode,
+              tooltip: 'Exit Ops Mode',
+              onPressed: () => setState(() => _isDeveloperMode = false),
             ),
-          ],
+          ] else
+            IconButton(
+              icon: const Icon(Icons.lock_outline, color: Colors.grey),
+              tooltip: 'Ops Login',
+              onPressed: _showDeveloperLoginDialog,
+            ),
         ],
       ),
-      body: _isOpsMode
-          ? opsScreens[_selectedIndex]
-          : BankingLedgerTab(isOpsMode: false),
-      bottomNavigationBar: _isOpsMode
+      body: RefreshIndicator(
+        onRefresh: _fetchAllData,
+        child: _isDeveloperMode ? _buildDeveloperView() : _buildCustomerView(),
+      ),
+      bottomNavigationBar: _isDeveloperMode
           ? NavigationBar(
-              selectedIndex: _selectedIndex,
-              onDestinationSelected: (idx) {
-                setState(() => _selectedIndex = idx);
-                _checkServerHealth();
-              },
+              selectedIndex: _devTabIndex,
+              onDestinationSelected: (idx) =>
+                  setState(() => _devTabIndex = idx),
               destinations: const [
-                NavigationDestination(icon: Icon(Icons.account_balance_wallet), label: 'Accounts'),
-                NavigationDestination(icon: Icon(Icons.store), label: 'Branches'),
-                NavigationDestination(icon: Icon(Icons.fact_check), label: 'Audit Ops'),
+                NavigationDestination(
+                  icon: Icon(Icons.account_balance_wallet_outlined),
+                  selectedIcon: Icon(Icons.account_balance_wallet),
+                  label: 'Accounts',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.storefront_outlined),
+                  selectedIcon: Icon(Icons.storefront),
+                  label: 'Branches',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.fact_check_outlined),
+                  selectedIcon: Icon(Icons.fact_check),
+                  label: 'Audit Ops',
+                ),
               ],
             )
           : null,
     );
   }
-}
 
-class BankingLedgerTab extends StatefulWidget {
-  final bool isOpsMode;
-  const BankingLedgerTab({super.key, required this.isOpsMode});
-
-  @override
-  State<BankingLedgerTab> createState() => _BankingLedgerTabState();
-}
-
-class _BankingLedgerTabState extends State<BankingLedgerTab> {
-  String _selectedFormat = 'ALL';
-  final List<String> _formats = ['ALL', 'PDF', 'CSV', 'JSON', 'XLSX', 'TXT'];
-
-  Future<Map<String, dynamic>> _loadData() async {
-    final activeFilter = widget.isOpsMode ? _selectedFormat : 'ALL';
-    final accounts = await ApiService.fetchAccounts();
-    final txns = await ApiService.fetchTransactions(sourceFormat: activeFilter);
-    return {'accounts': accounts, 'txns': txns};
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: () async => setState(() {}),
-      child: FutureBuilder<Map<String, dynamic>>(
-        future: _loadData(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Text(
-                  widget.isOpsMode
-                      ? 'API Error: ${snapshot.error}'
-                      : 'Unable to load account details right now. Pull down to refresh.',
+  Widget _buildScrollableMessage(String message, {bool isError = false}) {
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(24),
+      children: [
+        SizedBox(
+          height: MediaQuery.of(context).size.height * 0.65,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  isError ? Icons.wifi_off_rounded : Icons.inbox_outlined,
+                  size: 48,
+                  color: isError ? Colors.redAccent : Colors.grey,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  message,
                   textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: isError ? Colors.red.shade800 : Colors.black87,
+                  ),
                 ),
-              ),
-            );
-          }
-
-          final accounts = snapshot.data!['accounts'] as List<dynamic>;
-          final txns = snapshot.data!['txns'] as List<dynamic>;
-
-          return ListView(
-            padding: const EdgeInsets.all(14),
-            children: [
-              const Text(
-                'Your Accounts',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 120,
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: accounts.length,
-                  itemBuilder: (context, i) {
-                    final acc = accounts[i];
-                    return Card(
-                      elevation: 2,
-                      color: const Color(0xFF0F3D68),
-                      margin: const EdgeInsets.only(right: 12),
-                      child: Container(
-                        width: 220,
-                        padding: const EdgeInsets.all(14),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              'Savings A/C ••••${acc['account_id']}',
-                              style: const TextStyle(color: Colors.white70, fontSize: 13),
-                            ),
-                            Text(
-                              '₹ ${acc['net_balance'].toStringAsFixed(2)}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 21,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            Text(
-                              'In: ₹${acc['total_credits']}  |  Out: ₹${acc['total_debits']}',
-                              style: const TextStyle(color: Colors.white70, fontSize: 11),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 18),
-              Text(
-                widget.isOpsMode ? 'Unified Ledger (Source Filter)' : 'Recent Transactions',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              if (widget.isOpsMode) ...[
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 6,
-                  children: _formats.map((fmt) {
-                    return ChoiceChip(
-                      label: Text(fmt),
-                      selected: _selectedFormat == fmt,
-                      onSelected: (_) => setState(() => _selectedFormat = fmt),
-                    );
-                  }).toList(),
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  onPressed: _fetchAllData,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry Now'),
                 ),
               ],
-              const SizedBox(height: 8),
-              ...txns.map((t) {
-                final isCredit = t['transaction_type'].toString().toUpperCase() == 'CREDIT';
-                final subtitleText = widget.isOpsMode
-                    ? '${t['transaction_date']} • Branch #${t['branch_id']} • [${t['source_format']}]'
-                    : '${t['transaction_date']} • Branch #${t['branch_id']}';
-
-                return Card(
-                  elevation: 0.5,
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: isCredit ? Colors.green.shade50 : Colors.red.shade50,
-                      child: Icon(
-                        isCredit ? Icons.south_west : Icons.north_east,
-                        color: isCredit ? Colors.green.shade700 : Colors.red.shade700,
-                        size: 20,
-                      ),
-                    ),
-                    title: Text(
-                      widget.isOpsMode
-                          ? '${t['transaction_id']} • A/C #${t['account_id']}'
-                          : 'Ref: ${t['transaction_id']}',
-                      style: const TextStyle(fontWeight: FontWeight.w500),
-                    ),
-                    subtitle: Text(subtitleText),
-                    trailing: Text(
-                      '${isCredit ? '+' : '-'} ₹${t['amount']}',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                        color: isCredit ? Colors.green.shade700 : Colors.red.shade700,
-                      ),
-                    ),
-                  ),
-                );
-              }),
-            ],
-          );
-        },
-      ),
+            ),
+          ),
+        ),
+      ],
     );
   }
-}
 
-class BranchSummaryTab extends StatefulWidget {
-  const BranchSummaryTab({super.key});
+  Widget _buildCustomerView() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_errorMessage != null) {
+      return _buildScrollableMessage(
+        'Unable to load account details right now. Pull down to refresh.',
+      );
+    }
+    if (_accounts.isEmpty && _transactions.isEmpty) {
+      return _buildScrollableMessage(
+        'No active accounts or transactions found. Pull down to refresh.',
+      );
+    }
 
-  @override
-  State<BranchSummaryTab> createState() => _BranchSummaryTabState();
-}
-
-class _BranchSummaryTabState extends State<BranchSummaryTab> {
-  @override
-  Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: () async => setState(() {}),
-      child: FutureBuilder<List<dynamic>>(
-        future: ApiService.fetchBranchSummary(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
-          final rows = snapshot.data!;
-          return ListView.builder(
-            padding: const EdgeInsets.all(12),
-            itemCount: rows.length,
-            itemBuilder: (context, i) {
-              final r = rows[i];
-              return Card(
-                child: ListTile(
-                  leading: const Icon(Icons.storefront, color: Color(0xFF0F3D68)),
-                  title: Text(
-                    'Branch #${r['branch_id']}  (${r['transaction_date']})',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(16),
+      children: [
+        const Text(
+          'Your Accounts',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 10),
+        ..._accounts.map((acc) {
+          final name = acc['customer_name'] ?? acc['account_holder'] ?? 'Account';
+          final accNo = acc['account_id'] ?? acc['account_number'] ?? '';
+          final balance = acc['net_balance'] ?? acc['balance'] ?? 0;
+          return Card(
+            elevation: 0,
+            color: const Color(0xFF0D47A1),
+            margin: const EdgeInsets.only(bottom: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(18),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    name.toString(),
+                    style: const TextStyle(color: Colors.white70, fontSize: 14),
                   ),
-                  subtitle: Text(
-                    'Txns: ${r['transaction_count']} | Cr: ₹${r['total_credit']} | Dr: ₹${r['total_debit']}',
+                  const SizedBox(height: 4),
+                  Text(
+                    '₹ $balance',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 26,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                  trailing: Text(
-                    '₹${r['total_volume']}',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  const SizedBox(height: 8),
+                  Text(
+                    'A/C: $accNo',
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
                   ),
-                ),
-              );
-            },
+                ],
+              ),
+            ),
           );
-        },
-      ),
+        }),
+        const SizedBox(height: 12),
+        const Text(
+          'Recent Transactions',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        ..._transactions.take(30).map((txn) {
+          final type = (txn['txn_type'] ?? txn['type'] ?? '').toString().toUpperCase();
+          final isCredit = type == 'CREDIT' || type == 'CR';
+          final amount = txn['amount'] ?? 0;
+          final desc = txn['description'] ?? txn['merchant'] ?? txn['account_id'] ?? 'Transaction';
+          final date = txn['txn_date'] ?? txn['transaction_date'] ?? '';
+          return Card(
+            elevation: 0,
+            color: Colors.white,
+            margin: const EdgeInsets.only(bottom: 8),
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor:
+                    isCredit ? Colors.green.shade50 : Colors.red.shade50,
+                child: Icon(
+                  isCredit ? Icons.arrow_downward : Icons.arrow_upward,
+                  color: isCredit ? Colors.green : Colors.red,
+                  size: 18,
+                ),
+              ),
+              title: Text(
+                desc.toString(),
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+              ),
+              subtitle: Text(date.toString(), style: const TextStyle(fontSize: 12)),
+              trailing: Text(
+                '${isCredit ? '+' : '-'} ₹$amount',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isCredit ? Colors.green.shade700 : Colors.red.shade700,
+                ),
+              ),
+            ),
+          );
+        }),
+      ],
     );
   }
-}
 
-class PipelineAuditTab extends StatefulWidget {
-  const PipelineAuditTab({super.key});
+  Widget _buildDeveloperView() {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_errorMessage != null) {
+      return _buildScrollableMessage(
+        'API Error (${AppConfig.apiUrl}):\n\n$_errorMessage',
+        isError: true,
+      );
+    }
 
-  @override
-  State<PipelineAuditTab> createState() => _PipelineAuditTabState();
-}
-
-class _PipelineAuditTabState extends State<PipelineAuditTab> {
-  @override
-  Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: () async => setState(() {}),
-      child: FutureBuilder<List<dynamic>>(
-        future: ApiService.fetchAuditLogs(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
-          final logs = snapshot.data!;
-          return ListView.builder(
-            padding: const EdgeInsets.all(12),
-            itemCount: logs.length,
-            itemBuilder: (context, i) {
-              final log = logs[i];
-              final isSuccess = log['status'].toString().toUpperCase() == 'SUCCESS';
-              return Card(
-                child: ListTile(
-                  leading: Icon(
-                    isSuccess ? Icons.check_circle : Icons.error,
-                    color: isSuccess ? Colors.green : Colors.red,
-                  ),
-                  title: Text(
-                    '${log['source_file']} → ${log['target_table']}',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  subtitle: Text(
-                    'Read: ${log['rows_read']} | Loaded: ${log['rows_loaded']}\n'
-                    '${log['run_ts']} • ${log['message'] ?? ''}',
-                  ),
-                  isThreeLine: true,
-                  trailing: Chip(
-                    label: Text(
-                      log['status'],
-                      style: const TextStyle(fontSize: 11, color: Colors.white),
-                    ),
-                    backgroundColor: isSuccess ? Colors.green.shade700 : Colors.red.shade700,
-                  ),
-                ),
-              );
-            },
+    if (_devTabIndex == 0) {
+      if (_accounts.isEmpty) {
+        return _buildScrollableMessage('No account rows returned from /accounts.');
+      }
+      return ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(12),
+        itemCount: _accounts.length,
+        itemBuilder: (_, i) {
+          final item = _accounts[i];
+          return Card(
+            color: Colors.white,
+            child: ListTile(
+              title: Text('${item['account_id'] ?? 'Account'} • ${item['customer_name'] ?? ''}'),
+              subtitle: Text(item.toString(), style: const TextStyle(fontSize: 12)),
+            ),
           );
         },
-      ),
+      );
+    }
+
+    if (_devTabIndex == 1) {
+      if (_branches.isEmpty) {
+        return _buildScrollableMessage('No branch summary rows returned from /branches.');
+      }
+      return ListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(12),
+        itemCount: _branches.length,
+        itemBuilder: (_, i) {
+          final b = _branches[i];
+          return Card(
+            color: Colors.white,
+            child: ListTile(
+              leading: const Icon(Icons.storefront, color: Color(0xFF0D47A1)),
+              title: Text('${b['branch_code'] ?? b['branch_name'] ?? 'Branch'}'),
+              subtitle: Text(b.toString(), style: const TextStyle(fontSize: 12)),
+            ),
+          );
+        },
+      );
+    }
+
+    if (_auditLogs.isEmpty) {
+      return _buildScrollableMessage('No ingestion audit rows returned from /audit.');
+    }
+    return ListView.builder(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.all(12),
+      itemCount: _auditLogs.length,
+      itemBuilder: (_, i) {
+        final log = _auditLogs[i];
+        final status = (log['status'] ?? 'UNKNOWN').toString().toUpperCase();
+        final isSuccess = status == 'SUCCESS';
+        return Card(
+          color: Colors.white,
+          child: ListTile(
+            leading: Icon(
+              isSuccess ? Icons.check_circle : Icons.error,
+              color: isSuccess ? Colors.green : Colors.red,
+            ),
+            title: Text(
+              '${log['source_file'] ?? log['file_name'] ?? 'Batch'} ($status)',
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+            subtitle: Text(log.toString(), style: const TextStyle(fontSize: 12)),
+          ),
+        );
+      },
     );
   }
 }
