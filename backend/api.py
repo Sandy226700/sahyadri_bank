@@ -28,6 +28,15 @@ def fetch_all(query: str):
         conn.close()
 
 
+def sort_by_first_available(rows: list[dict], candidate_keys: list[str], reverse: bool = True):
+    if not rows:
+        return rows
+    for key in candidate_keys:
+        if key in rows[0]:
+            return sorted(rows, key=lambda r: str(r.get(key) or ""), reverse=reverse)
+    return rows
+
+
 @app.get("/health")
 def health_check():
     fetch_all("SELECT 1 AS ok")
@@ -39,23 +48,33 @@ def health_check():
 
 @app.get("/accounts")
 def get_accounts():
-    return fetch_all("SELECT * FROM v_account_summary ORDER BY account_id")
+    rows = fetch_all("SELECT * FROM v_account_summary")
+    return sort_by_first_available(rows, ["account_id", "account_number"], reverse=False)
 
 
 @app.get("/transactions")
 def get_transactions():
-    return fetch_all("SELECT * FROM v_all_transactions ORDER BY txn_date DESC LIMIT 100")
+    rows = fetch_all("SELECT * FROM v_all_transactions LIMIT 200")
+    rows = sort_by_first_available(
+        rows, ["txn_date", "transaction_date", "created_at", "txn_id", "id"], reverse=True
+    )
+    return rows[:100]
 
 
 @app.get("/branches")
 @app.get("/branch-summary")
 def get_branches():
-    return fetch_all(
-        "SELECT * FROM v_branch_daily_summary ORDER BY txn_date DESC, branch_code"
+    rows = fetch_all("SELECT * FROM v_branch_daily_summary")
+    return sort_by_first_available(
+        rows, ["txn_date", "summary_date", "date", "branch_code", "branch"], reverse=True
     )
 
 
 @app.get("/audit")
 @app.get("/audit-logs")
 def get_audit():
-    return fetch_all("SELECT * FROM ingestion_audit ORDER BY run_id DESC LIMIT 50")
+    rows = fetch_all("SELECT * FROM ingestion_audit")
+    rows = sort_by_first_available(
+        rows, ["run_id", "audit_id", "id", "created_at", "ingested_at", "run_timestamp"], reverse=True
+    )
+    return rows[:50]
