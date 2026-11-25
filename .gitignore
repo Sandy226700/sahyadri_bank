@@ -1,0 +1,11 @@
+*.pem
+data/*
+!data/.gitkeep
+.env
+__pycache__/
+*.pyc
+.env.*
+!.env.example
+reports/
+build/
+.dart_tool/
