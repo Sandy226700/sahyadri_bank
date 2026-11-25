@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-
 import pymysql
 from dotenv import dotenv_values
 
@@ -13,18 +12,24 @@ def get_environment():
     env = os.getenv("APP_ENV", "dev").strip().lower()
     if env not in ENVIRONMENTS:
         raise SystemExit(
-            f"Unknown APP_ENV '{env}'. Use one of: {', '.join(ENVIRONMENTS)}")
+            f"Unknown APP_ENV '{env}'. Use one of: {', '.join(ENVIRONMENTS)}"
+        )
     return env
 
 
 def load_settings(env):
     path = PROJECT_ROOT / f".env.{env}"
-    if not path.exists():
-        raise SystemExit(f"Settings file {path.name} not found for environment '{env}'")
-    settings = dotenv_values(path)
+    if path.exists():
+        settings = dotenv_values(path)
+    else:
+        settings = {
+            k: os.getenv(k)
+            for k in REQUIRED + ["DB_SSL_CA", "DB_SSL_CA_CONTENT"]
+        }
+
     missing = [k for k in REQUIRED if not settings.get(k)]
     if missing:
-        raise SystemExit(f"Missing settings in {path.name}: {', '.join(missing)}")
+        raise SystemExit(f"Missing settings for '{env}': {', '.join(missing)}")
     return settings
 
 
@@ -39,16 +44,12 @@ def connect():
         database=s["DB_NAME"],
         charset="utf8mb4",
     )
-    if s.get("DB_SSL_CA"):
+
+    if s.get("DB_SSL_CA_CONTENT"):
+        ca_path = Path("/tmp/aiven_ca.pem")
+        ca_path.write_text(s["DB_SSL_CA_CONTENT"], encoding="utf-8")
+        options["ssl_ca"] = str(ca_path)
+    elif s.get("DB_SSL_CA"):
         options["ssl_ca"] = s["DB_SSL_CA"]
+
     return pymysql.connect(**options)
-
-
-if __name__ == "__main__":
-    env = get_environment()
-    conn = connect()
-    with conn.cursor() as cur:
-        cur.execute("SELECT DATABASE(), VERSION()")
-        db_name, version = cur.fetchone()
-    print(f"Connected to {env} database {db_name} (server version {version})")
-    conn.close()
